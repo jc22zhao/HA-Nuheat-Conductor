@@ -25,7 +25,7 @@ from .const import API_URL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(minutes=5)
+SCAN_INTERVAL = timedelta(seconds=90)
 
 
 class NuheatConductorAPI:
@@ -167,10 +167,21 @@ class NuheatConductorAPI:
         )
         return result is not None
 
-    async def set_schedule_mode(self, thermostat_id: str, mode: int) -> bool:
-        """Set the schedule mode for a thermostat."""
-        # Serial number goes in the body, not the URL path
-        data = {"serialNumber": thermostat_id, "scheduleMode": mode}
+    async def set_schedule_mode(self, thermostat_id: str, mode: int, name: str = "", current_temp: float | None = None) -> bool:
+        """Set the schedule mode for a thermostat.
+        
+        When switching to Hold or Permanent Hold, the current setpoint must be
+        included in the payload or the API may reset the temperature to 0.
+        """
+        data: dict = {"serialNumber": thermostat_id, "scheduleMode": mode}
+        if name:
+            data["name"] = name
+        # Always include the setpoint when switching to Hold or Permanent Hold
+        # to prevent the API from resetting the temperature to 0
+        if current_temp is not None and mode in (2, 3):
+            data["setPointTemp"] = int(current_temp * 100)
+            data["holdSetPointDateTime"] = None
+        _LOGGER.debug("Setting schedule mode: %s", data)
         result = await self._make_request(
             "PUT", "/api/v1/Thermostat", json=data
         )
@@ -280,9 +291,16 @@ class NuheatConductorThermostat(ClimateEntity):
         
         _LOGGER.debug("Raw thermostat data: %s", data)
         
-        # Convert temperatures from integer (3000 = 30.00°F) to float
+        # Convert temperatures from integer (3000 = 30.00°C, 2195 = 21.95°C) to float
+        # Thermostats only support 0.5° increments, so round to nearest 0.5
+        # This also handles imprecise values the API sometimes returns (e.g. 2186, 2192)
+        # which are artefacts of Fahrenheit/Celsius schedule conversions
+        def convert_temp(raw: int) -> float:
+            """Convert raw API temp integer to nearest 0.5 degree increment."""
+            return round((raw / 100.0) * 2) / 2
+
         temp = data.get("currentTemperature")
-        self._current_temperature = temp / 100.0 if temp is not None else None
+        self._current_temperature = convert_temp(temp) if temp is not None else None
         _LOGGER.debug(
             "Temperature conversion for %s: raw=%s, converted=%s, unit=%s",
             self._attr_name,
@@ -292,13 +310,13 @@ class NuheatConductorThermostat(ClimateEntity):
         )
         
         setpoint = data.get("setPointTemp")
-        self._target_temperature = setpoint / 100.0 if setpoint is not None else None
+        self._target_temperature = convert_temp(setpoint) if setpoint is not None else None
         
         min_temp = data.get("minTemp")
-        self._min_temperature = min_temp / 100.0 if min_temp is not None else None
+        self._min_temperature = convert_temp(min_temp) if min_temp is not None else None
         
         max_temp = data.get("maxTemp")
-        self._max_temperature = max_temp / 100.0 if max_temp is not None else None
+        self._max_temperature = convert_temp(max_temp) if max_temp is not None else None
         
         self._schedule_mode = data.get("scheduleMode")
         self._is_online = data.get("online", True)
@@ -412,13 +430,37 @@ class NuheatConductorThermostat(ClimateEntity):
             self._attr_temperature_unit,
         )
 
+        # Determine the correct scheduleMode to send:
+        # - If currently on Auto (schedule mode 1): user is overriding schedule -> use Hold (2)
+        # - If currently on Hold (2): keep it as Hold (2)
+        # - If currently on Permanent Hold (3): keep it as Permanent Hold (3)
+        # - If no schedule mode is known (None): default to Permanent Hold (3)
+        #   because without a schedule, Hold (2) doesn't stick
+        if self._schedule_mode == 1:
+            # On a schedule - temporary override until next schedule event
+            send_mode = 2  # Hold
+        elif self._schedule_mode == 2:
+            # Already in Hold - keep it as Hold
+            send_mode = 2
+        elif self._schedule_mode == 3:
+            # In Permanent Hold - respect user's choice and keep as Permanent Hold
+            send_mode = 3
+        else:
+            # Unknown/no schedule - use Permanent Hold so the change actually sticks
+            send_mode = 3
+
+        _LOGGER.debug(
+            "Determined scheduleMode for %s: current_mode=%s, sending_mode=%s",
+            self._attr_name,
+            self._schedule_mode,
+            send_mode,
+        )
+
         success = await self._api.set_target_temperature(
-            self._thermostat_id, temperature, name=self._attr_name, mode=2
+            self._thermostat_id, temperature, name=self._attr_name, mode=send_mode
         )
         if success:
-            # Don't update _target_temperature here - let the next API refresh handle it
-            # to avoid any unit conversion confusion
-            self._schedule_mode = 2  # Temporary hold
+            self._schedule_mode = send_mode
             _LOGGER.debug("Temperature set command sent successfully")
             self.async_write_ha_state()
         else:
@@ -456,7 +498,12 @@ class NuheatConductorThermostat(ClimateEntity):
             _LOGGER.error("Unknown preset mode: %s", preset_mode)
             return
 
-        success = await self._api.set_schedule_mode(self._thermostat_id, mode)
+        success = await self._api.set_schedule_mode(
+            self._thermostat_id,
+            mode,
+            name=self._attr_name,
+            current_temp=self._target_temperature,
+        )
         if success:
             self._schedule_mode = mode
             self.async_write_ha_state()
