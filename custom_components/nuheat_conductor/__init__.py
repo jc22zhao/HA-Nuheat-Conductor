@@ -12,6 +12,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .config_flow import NuheatConductorLocalOAuth2Implementation
 from .const import DOMAIN
+from .signalr import NuheatSignalRManager
 
 PLATFORMS = [Platform.CLIMATE]
 
@@ -33,7 +34,7 @@ async def async_setup_entry(
         DOMAIN,
         NuheatConductorLocalOAuth2Implementation(hass),
     )
-    
+
     implementation = (
         await config_entry_oauth2_flow.async_get_config_entry_implementation(
             hass, entry
@@ -49,8 +50,16 @@ async def async_setup_entry(
         _LOGGER.error("Failed to get valid token: %s", err)
         return False
 
+    # Create and start the SignalR manager for real-time notifications
+    signalr_manager = NuheatSignalRManager(hass, session)
+    await signalr_manager.async_start()
+
+    # Store both the session and SignalR manager for use by climate.py
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = session
+    hass.data[DOMAIN][entry.entry_id] = {
+        "session": session,
+        "signalr": signalr_manager,
+    }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -58,6 +67,12 @@ async def async_setup_entry(
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    # Stop the SignalR connection cleanly before unloading
+    entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+    signalr_manager: NuheatSignalRManager | None = entry_data.get("signalr")
+    if signalr_manager:
+        await signalr_manager.async_stop()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)

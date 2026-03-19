@@ -22,6 +22,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import API_URL, DOMAIN
+from .signalr import NuheatSignalRManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,11 +109,11 @@ class NuheatConductorAPI:
 
     async def set_group_away_mode(self, group_id: str, away_mode: bool) -> bool:
         """Set away mode for a group.
-        
+
         Args:
             group_id: The group ID
             away_mode: True to enable away mode, False to disable
-        
+
         """
         data = {"groupId": group_id, "awayMode": away_mode}
         _LOGGER.debug("Setting group away mode: %s", data)
@@ -162,14 +163,18 @@ class NuheatConductorAPI:
             "holdSetPointDateTime": None,  # null for temporary/permanent hold
         }
         _LOGGER.debug("Sending to API: %s", data)
-        result = await self._make_request(
-            "PUT", "/api/v1/Thermostat", json=data
-        )
+        result = await self._make_request("PUT", "/api/v1/Thermostat", json=data)
         return result is not None
 
-    async def set_schedule_mode(self, thermostat_id: str, mode: int, name: str = "", current_temp: float | None = None) -> bool:
+    async def set_schedule_mode(
+        self,
+        thermostat_id: str,
+        mode: int,
+        name: str = "",
+        current_temp: float | None = None,
+    ) -> bool:
         """Set the schedule mode for a thermostat.
-        
+
         When switching to Hold or Permanent Hold, the current setpoint must be
         included in the payload or the API may reset the temperature to 0.
         """
@@ -182,9 +187,7 @@ class NuheatConductorAPI:
             data["setPointTemp"] = int(current_temp * 100)
             data["holdSetPointDateTime"] = None
         _LOGGER.debug("Setting schedule mode: %s", data)
-        result = await self._make_request(
-            "PUT", "/api/v1/Thermostat", json=data
-        )
+        result = await self._make_request("PUT", "/api/v1/Thermostat", json=data)
         return result is not None
 
 
@@ -194,7 +197,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Nuheat Conductor climate platform from config entry."""
-    oauth_session = hass.data[DOMAIN][entry.entry_id]
+    entry_data = hass.data[DOMAIN][entry.entry_id]
+    oauth_session = entry_data["session"]
+    signalr_manager: NuheatSignalRManager = entry_data["signalr"]
     websession = async_get_clientsession(hass)
 
     api = NuheatConductorAPI(oauth_session, websession)
@@ -204,7 +209,7 @@ async def async_setup_entry(
         account_info = await api.get_account_info()
         temp_scale = UnitOfTemperature.FAHRENHEIT  # Default to Fahrenheit
         use_12_hour = True  # Default to 12-hour clock
-        
+
         if account_info:
             scale = account_info.get("temperatureScale")
             use_12_hour = account_info.get("use12Hour", True)
@@ -218,7 +223,7 @@ async def async_setup_entry(
                 temp_scale = UnitOfTemperature.CELSIUS
             elif scale == "Fahrenheit":
                 temp_scale = UnitOfTemperature.FAHRENHEIT
-        
+
         # Get thermostats
         thermostats = await api.get_thermostats()
         _LOGGER.debug("Found %d thermostats", len(thermostats))
@@ -230,19 +235,26 @@ async def async_setup_entry(
         # Create thermostat entities
         entities = [
             NuheatConductorThermostat(
-                api, thermostat, entry.entry_id, temp_scale, use_12_hour
+                api,
+                thermostat,
+                entry.entry_id,
+                temp_scale,
+                use_12_hour,
+                signalr_manager,
             )
             for thermostat in thermostats
         ]
-        
+
         # Create group entities
-        entities.extend([
-            NuheatConductorGroup(
-                api, group, entry.entry_id, temp_scale, use_12_hour
-            )
-            for group in groups
-        ])
-        
+        entities.extend(
+            [
+                NuheatConductorGroup(
+                    api, group, entry.entry_id, temp_scale, use_12_hour, signalr_manager
+                )
+                for group in groups
+            ]
+        )
+
         async_add_entities(entities, True)
     except Exception:
         _LOGGER.exception("Failed to get thermostats and groups")
@@ -264,6 +276,7 @@ class NuheatConductorThermostat(ClimateEntity):
         entry_id: str,
         temperature_unit: UnitOfTemperature,
         use_12_hour: bool = True,
+        signalr_manager: NuheatSignalRManager | None = None,
     ) -> None:
         """Initialize the thermostat."""
         self._api = api
@@ -271,7 +284,8 @@ class NuheatConductorThermostat(ClimateEntity):
         self._attr_name = thermostat_data.get("name", "Nuheat Conductor Thermostat")
         self._attr_unique_id = f"nuheat_conductor_{self._thermostat_id}"
         self._attr_temperature_unit = temperature_unit
-        self._use_12_hour = use_12_hour  # Store for potential future use
+        self._use_12_hour = use_12_hour
+        self._signalr_manager = signalr_manager
         self._current_temperature: float | None = None
         self._target_temperature: float | None = None
         self._min_temperature: float | None = None
@@ -284,13 +298,34 @@ class NuheatConductorThermostat(ClimateEntity):
         # Set initial values from thermostat data
         self._update_from_data(thermostat_data)
 
+    async def async_added_to_hass(self) -> None:
+        """Register SignalR callback when entity is added to HA."""
+        if self._signalr_manager and self._thermostat_id:
+            self._signalr_manager.register_callback(
+                self._thermostat_id, self._async_signalr_update
+            )
+            _LOGGER.debug(
+                "Registered SignalR callback for thermostat %s", self._thermostat_id
+            )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Unregister SignalR callback when entity is removed."""
+        if self._signalr_manager and self._thermostat_id:
+            self._signalr_manager.unregister_callback(self._thermostat_id)
+
+    async def _async_signalr_update(self) -> None:
+        """Handle a real-time SignalR notification by refreshing state from API."""
+        _LOGGER.debug("SignalR triggered update for thermostat %s", self._thermostat_id)
+        await self.async_update()
+        self.async_write_ha_state()
+
     def _update_from_data(self, data: dict) -> None:
         """Update internal state from thermostat data."""
         if not data:
             return
-        
+
         _LOGGER.debug("Raw thermostat data: %s", data)
-        
+
         # Convert temperatures from integer (3000 = 30.00°C, 2195 = 21.95°C) to float
         # Thermostats only support 0.5° increments, so round to nearest 0.5
         # This also handles imprecise values the API sometimes returns (e.g. 2186, 2192)
@@ -308,25 +343,27 @@ class NuheatConductorThermostat(ClimateEntity):
             self._current_temperature,
             self._attr_temperature_unit,
         )
-        
+
         setpoint = data.get("setPointTemp")
-        self._target_temperature = convert_temp(setpoint) if setpoint is not None else None
-        
+        self._target_temperature = (
+            convert_temp(setpoint) if setpoint is not None else None
+        )
+
         min_temp = data.get("minTemp")
         self._min_temperature = convert_temp(min_temp) if min_temp is not None else None
-        
+
         max_temp = data.get("maxTemp")
         self._max_temperature = convert_temp(max_temp) if max_temp is not None else None
-        
+
         self._schedule_mode = data.get("scheduleMode")
         self._is_online = data.get("online", True)
-        
+
         # If offline, override heating status to prevent showing active heating
         if not self._is_online:
             self._is_heating = False
         else:
             self._is_heating = data.get("isHeating", False)
-        
+
         # Keep entity available even when offline so data still displays
         # We'll indicate offline status through hvac_action and attributes
 
@@ -353,8 +390,10 @@ class NuheatConductorThermostat(ClimateEntity):
         """Return the maximum temperature."""
         if self._max_temperature is not None:
             return self._max_temperature
-        # Default based on temperature unit  
-        return 40.0 if self._attr_temperature_unit == UnitOfTemperature.CELSIUS else 104.0
+        # Default based on temperature unit
+        return (
+            40.0 if self._attr_temperature_unit == UnitOfTemperature.CELSIUS else 104.0
+        )
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -399,14 +438,14 @@ class NuheatConductorThermostat(ClimateEntity):
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         """Return additional state attributes."""
         attrs: dict[str, Any] = {}
-        
+
         # Show prominent online/offline status
         attrs["connection_status"] = "Online" if self._is_online else "Offline"
-        
+
         # Add warning badge for offline thermostats
         if not self._is_online:
             attrs["warning"] = "Thermostat is offline - showing last known settings"
-        
+
         return attrs
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -492,7 +531,7 @@ class NuheatConductorThermostat(ClimateEntity):
             "Hold": 2,  # Temporary hold
             "Permanent Hold": 3,  # Permanent hold
         }
-        
+
         mode = mode_map.get(preset_mode)
         if mode is None:
             _LOGGER.error("Unknown preset mode: %s", preset_mode)
@@ -565,6 +604,7 @@ class NuheatConductorGroup(ClimateEntity):
         entry_id: str,
         temperature_unit: UnitOfTemperature,
         use_12_hour: bool = True,
+        signalr_manager: NuheatSignalRManager | None = None,
     ) -> None:
         """Initialize the group."""
         self._api = api
@@ -574,6 +614,7 @@ class NuheatConductorGroup(ClimateEntity):
         self._attr_unique_id = f"nuheat_conductor_group_{self._group_id}"
         self._attr_temperature_unit = temperature_unit
         self._use_12_hour = use_12_hour
+        self._signalr_manager = signalr_manager
         self._away_mode: bool = False
         self._away_setpoint: float | None = None
         self._attr_available = True
@@ -581,13 +622,32 @@ class NuheatConductorGroup(ClimateEntity):
         # Set initial values from group data
         self._update_from_data(group_data)
 
+    async def async_added_to_hass(self) -> None:
+        """Register SignalR callback when entity is added to HA."""
+        if self._signalr_manager and self._group_id:
+            self._signalr_manager.register_callback(
+                self._group_id, self._async_signalr_update
+            )
+            _LOGGER.debug("Registered SignalR callback for group %s", self._group_id)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Unregister SignalR callback when entity is removed."""
+        if self._signalr_manager and self._group_id:
+            self._signalr_manager.unregister_callback(self._group_id)
+
+    async def _async_signalr_update(self) -> None:
+        """Handle a real-time SignalR notification by refreshing state from API."""
+        _LOGGER.debug("SignalR triggered update for group %s", self._group_id)
+        await self.async_update()
+        self.async_write_ha_state()
+
     def _update_from_data(self, data: dict) -> None:
         """Update internal state from group data."""
         if not data:
             return
 
         self._away_mode = data.get("awayMode", False)
-        
+
         # Convert away setpoint temperature
         away_temp = data.get("awaySetPointTemp")
         self._away_setpoint = away_temp / 100.0 if away_temp is not None else None
@@ -630,7 +690,7 @@ class NuheatConductorGroup(ClimateEntity):
 
         # "Away" preset enables away mode, "Home" disables it
         away_mode = preset_mode == "Away"
-        
+
         success = await self._api.set_group_away_mode(self._group_id, away_mode)
         if success:
             self._away_mode = away_mode
@@ -660,6 +720,6 @@ class NuheatConductorGroup(ClimateEntity):
                 self._update_from_data(group)
                 self._attr_available = True
                 return
-        
+
         # Group not found
         self._attr_available = False
