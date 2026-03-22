@@ -2,15 +2,20 @@
 
 A custom Home Assistant integration for Nuheat Conductor radiant heating thermostats. Control and monitor your Nuheat Conductor heating systems directly from Home Assistant.
 
-This integration is for Nuheat Conductor thermostats. For Nuheat Signature thermostats, please use the official Nuheat Integration in Home Assistant.
+This integration is for **Nuheat Conductor** thermostats. For Nuheat Signature thermostats, please use the official [Nuheat Integration](https://www.home-assistant.io/integrations/nuheat/) in Home Assistant.
 
 ## Features
 
-* 🌡️ **Climate Control** - Full thermostat control through Home Assistant's climate platform
-* 🔐 **Secure OAuth2 Authentication** - Browser-based OAuth2 Authorization Code flow
-* 📊 **Real-time Monitoring** - Current temperature and heating status
-* 🎯 **Temperature Control** - Set target temperatures and heating modes
-* 🔄 **Auto-discovery** - Automatically discovers all thermostats on your Nuheat account
+* ⚡ **Real-time Push Notifications** - Instant state updates via SignalR WebSocket connection — changes in the Nuheat app appear in Home Assistant almost immediately
+* 🌡️ **Full Climate Control** - Set target temperatures, heating modes, and presets through Home Assistant's climate platform
+* 🔐 **Secure OAuth2 Authentication** - Browser-based OAuth2 Authorization Code flow — no API keys required
+* 📊 **Live Monitoring** - Current temperature, heating status, and connection state
+* 🗓️ **Schedule & Hold Support** - Auto (schedule), Hold, and Permanent Hold presets
+  * Please note: currently the Nuheat API does not allow access to viewing, editing, or adding schedules created in the Nuheat Conductor app. Using Auto will apply the schedule that is currently selected in the Nuheat Conductor app.
+* 👥 **Group Control** - Manage Home/Away modes for groups
+* 🔌 **Offline Resilience** - Offline thermostats remain visible with last known settings; automations continue to run for online thermostats
+* 🔄 **Auto-discovery** - Automatically discovers all thermostats and groups on your Nuheat account
+* 🔁 **Automatic Reconnection** - SignalR connection recovers automatically after network interruptions, with 90-second polling as a fallback
 
 ## Prerequisites
 
@@ -47,6 +52,7 @@ config/
 │       ├── config_flow.py
 │       ├── const.py
 │       ├── manifest.json
+│       ├── signalr.py
 │       └── strings.json
 ```
 
@@ -75,19 +81,35 @@ This integration uses OAuth2 Authorization Code flow for secure authentication:
 * Do not setup from the Home Assistant mobile app, as OAuth will open in your device's browser
 * Use the same device and browser throughout the entire setup process
 
-
 ## Usage
 
-Once configured, your Nuheat thermostats will appear as climate entities in Home Assistant.
+Once configured, your Nuheat thermostats and groups will appear as climate entities in Home Assistant.
 
-### Basic Operations
+### Thermostat Presets
 
-**View in Lovelace:**
+Each thermostat supports three presets:
 
-```yaml
-type: thermostat
-entity: climate.nuheat_living_room
-```
+| Preset | Description |
+|--------|-------------|
+| **Auto** | Thermostat follows its Nuheat schedule |
+| **Hold** | Holds the current temperature until the next scheduled event |
+| **Permanent Hold** | Holds the temperature indefinitely until manually changed |
+
+When you adjust the temperature:
+- If the thermostat is on **Auto**, it switches to **Hold** automatically
+- If it's already on **Hold** or **Permanent Hold**, it stays on that preset
+- If no schedule is configured, changes always use **Permanent Hold**
+
+### Group Control
+
+Thermostat groups appear as separate climate entities with Home/Away presets:
+
+| Preset | Description |
+|--------|-------------|
+| **Home** | Disables away mode — thermostats follow their normal schedules |
+| **Away** | Enables away mode — thermostats switch to the group's away setpoint |
+
+### Basic Automation Examples
 
 **Set Temperature:**
 
@@ -96,23 +118,57 @@ service: climate.set_temperature
 target:
   entity_id: climate.nuheat_living_room
 data:
-  temperature: 72
+  temperature: 22
 ```
 
-**Set HVAC Mode:**
+**Set Preset Mode:**
 
 ```yaml
-service: climate.set_hvac_mode
+service: climate.set_preset_mode
 target:
   entity_id: climate.nuheat_living_room
 data:
-  hvac_mode: heat
+  preset_mode: "Permanent Hold"
+```
+
+**Set Group Away:**
+
+```yaml
+service: climate.set_preset_mode
+target:
+  entity_id: climate.group_main_floor
+data:
+  preset_mode: "Away"
+```
+
+**View in Lovelace:**
+
+```yaml
+type: thermostat
+entity: climate.nuheat_living_room
 ```
 
 ### Available HVAC Modes
 
 * `heat` - Heating enabled
-* `off` - Heating disabled
+* `off` - Heating disabled (sets thermostat to minimum temperature)
+
+### Offline Thermostat Behaviour
+
+When a thermostat goes offline:
+- The entity remains visible in Home Assistant showing last known settings
+- The HVAC mode shows as **Off** and the HVAC action shows as **Off**
+- The entity's `connection_status` attribute changes to `Offline` and a `warning` attribute is added
+- Temperature and preset commands are silently skipped — **automations will not abort** and will continue updating other thermostats in the same call
+- The entity is only marked fully unavailable after 3 consecutive failed API polls (approximately 4.5 minutes)
+
+> **Note:** Due to a Home Assistant limitation, if your automation targets multiple thermostats in a single `climate.set_temperature` call and one is marked fully unavailable, that entire service call will fail. The integration deliberately avoids marking thermostats unavailable for transient offline states to prevent this. You can check whether a thermostat is offline via its `connection_status` attribute.
+
+## Real-time Updates
+
+This integration uses **SignalR WebSocket push notifications** to receive instant updates from Nuheat's servers. When you make a change in the Nuheat app or on the thermostat itself, Home Assistant reflects the change almost immediately — no waiting for the next poll cycle.
+
+If the SignalR connection is unavailable (e.g. during network interruptions), the integration automatically falls back to polling every 90 seconds, and reconnects SignalR as soon as possible.
 
 ## API Endpoints
 
@@ -120,6 +176,7 @@ This integration connects to:
 
 * **Identity Server:** `https://identity.nam.mynuheat.com`
 * **API Server:** `https://api.nam.mynuheat.com`
+* **Notification Hub:** `https://api.nam.mynuheat.com/v1/changenotifications`
 
 ## Troubleshooting
 
@@ -130,81 +187,59 @@ This integration connects to:
 **Symptoms:**
 * Setup fails during OAuth redirect
 * When you try to add the integration again, you see "Configuration flow is already in progress"
-* Cannot delete or restart the setup flow
-
-**Cause:**
-This typically happens when:
-1. You start setup on one device (e.g., Home Assistant mobile app) but the OAuth redirect happens in a different context (browser)
-2. The OAuth flow times out or is interrupted during authentication
-3. The redirect back to Home Assistant fails due to session mismatch
 
 **Solution:**
-1. **Restart Home Assistant** - This is required to clear the stuck flow state
-   * Go to **Settings** → **System** → **Restart**
-   * Or use the restart command from your installation method
+1. **Restart Home Assistant** to clear the stuck flow state
 2. After restart, try adding the integration again
-3. **Important:** Use the same device and browser throughout:
-   * If starting from the web interface, complete everything in that browser
-   * If starting from the mobile app, be aware that OAuth will open in your device's browser
-   * Don't switch between devices during the setup process
+3. Use the same device and browser throughout the entire setup process
 
 **Prevention:**
-* Always use the Home Assistant web interface (not mobile app) for initial setup if possible
-* Keep the browser window open and don't close tabs during OAuth flow
-* Ensure stable internet connection during setup
-* Complete the entire flow in one sitting without interruptions
+* Always use the Home Assistant web interface (not mobile app) for initial setup
+* Keep the browser window open during OAuth flow
+* Ensure a stable internet connection during setup
 
 #### OAuth Redirect Fails
 
 **Symptoms:**
 * Browser redirects to Nuheat but doesn't return to Home Assistant
-* Gets stuck on "Redirecting..." or similar message
-* Error messages about invalid redirect URI
 
 **Solution:**
-1. Verify your Home Assistant is accessible via the external URL configured in Settings
-2. Check that your Home Assistant external URL is configured correctly:
-   * Go to **Settings** → **System** → **Network**
-   * Verify **External URL** is set correctly
-3. If using Nabu Casa Cloud, ensure your subscription is active
-4. Try using the local network URL instead of external URL during setup
-5. Restart Home Assistant and try again
+1. Verify your Home Assistant external URL is configured correctly:
+   * Go to **Settings** → **System** → **Network** → **External URL**
+2. If using Nabu Casa Cloud, ensure your subscription is active
+3. Try using the local network URL instead of external URL during setup
+4. Restart Home Assistant and try again
 
 ### Integration Not Appearing
 
 **Solution:**
-1. Ensure files are in the correct directory: `config/custom_components/nuheat_conductor/`
-2. Verify all required files are present (see directory structure above)
-3. Restart Home Assistant completely
-4. Check Home Assistant logs for errors: **Settings** → **System** → **Logs**
-5. Search logs for "nuheat" to see any specific errors
+1. Ensure all files are in `config/custom_components/nuheat_conductor/` (including `signalr.py`)
+2. Restart Home Assistant completely (not just reload)
+3. Check logs at **Settings** → **System** → **Logs** and search for "nuheat"
 
 ### Authentication Failures
 
 **Solution:**
-1. Verify you have the correct Nuheat credentials
-2. Confirm you can log in to the Nuheat web portal at [mynuheat.com](https://www.mynuheat.com)
-3. Check that Nuheat has enabled the `openapi` scope for your account
-4. Try removing and re-adding the integration:
-   * Go to **Settings** → **Devices & Services**
-   * Find **Nuheat Conductor**
-   * Click the three dots → **Delete**
+1. Verify your Nuheat credentials at [mynuheat.com](https://www.mynuheat.com)
+2. Try removing and re-adding the integration:
+   * **Settings** → **Devices & Services** → **Nuheat Conductor** → three dots → **Delete**
    * Restart Home Assistant
    * Add the integration again
 
 ### No Thermostats Discovered
 
 **Solution:**
-1. Verify your thermostats appear in the Nuheat mobile app or web portal
+1. Verify your thermostats are visible in the Nuheat mobile app
 2. Check that thermostats are online and communicating
-3. Review Home Assistant logs for API errors:
-   * Go to **Settings** → **System** → **Logs**
-   * Search for "nuheat"
-4. Try reloading the integration:
-   * Go to **Settings** → **Devices & Services**
-   * Find **Nuheat Conductor**
-   * Click **⋮** → **Reload**
-5. If thermostats are offline (e.g., during renovation), they will still appear in Home Assistant but show as "unavailable"
+3. Enable debug logging (see below) and look for API errors
+4. Try reloading the integration: **Settings** → **Devices & Services** → **Nuheat Conductor** → **⋮** → **Reload**
+
+### SignalR Not Connecting
+
+If you see repeated "SignalR disconnected. Reconnecting..." messages in the logs:
+1. Check your Home Assistant server has outbound WebSocket access to `api.nam.mynuheat.com`
+2. The integration will continue to function via 90-second polling while SignalR is unavailable
+3. SignalR will reconnect automatically — no action required
 
 ### Logs and Debugging
 
@@ -218,36 +253,6 @@ logger:
 ```
 
 Then restart Home Assistant and check logs at **Settings** → **System** → **Logs**.
-
-## Development
-
-### Local Development Setup
-
-1. Clone the Home Assistant development environment:
-
-```bash
-git clone https://github.com/home-assistant/core.git
-cd core
-```
-
-2. Set up the development environment following [Home Assistant's developer documentation](https://developers.home-assistant.io/docs/development_environment)
-3. Copy the integration files to `config/custom_components/nuheat_conductor/`
-4. Start Home Assistant in development mode
-
-### Running Tests
-
-```bash
-pytest tests/components/nuheat_conductor/
-```
-
-### Code Quality
-
-This integration follows Home Assistant's coding standards:
-
-* Type hints throughout
-* Async/await patterns
-* Comprehensive error handling
-* Proper entity lifecycle management
 
 ## Support
 
@@ -268,7 +273,7 @@ Contributions are welcome! Please:
 ## Acknowledgments
 
 * Thanks to the Home Assistant community for their excellent documentation
-* Nuheat for providing API access
+* Nuheat for providing API access and SignalR notification support
 * All contributors who help improve this integration
 
 ## License
@@ -281,4 +286,4 @@ This is an unofficial integration and is not affiliated with, endorsed by, or su
 
 ---
 
-**Current Version:** 1.0.0
+**Current Version:** 1.0.0-beta.8

@@ -130,7 +130,7 @@ class NuheatSignalRManager:
         while self._running:
             try:
                 await self._connect_and_listen()
-                # If we get here cleanly, reset the reconnect counter
+                # Clean exit - reset the reconnect counter
                 self._reconnect_attempt = 0
             except asyncio.CancelledError:
                 _LOGGER.debug("SignalR connection loop cancelled")
@@ -163,6 +163,17 @@ class NuheatSignalRManager:
         await self._oauth_session.async_ensure_token_valid()
         return self._oauth_session.token["access_token"]
 
+    def _token_expires_in(self) -> float:
+        """Return seconds until the current token expires, or 0 if unknown."""
+        try:
+            expires_at = self._oauth_session.token.get("expires_at", 0)
+            import time
+
+            remaining = expires_at - time.time()
+            return max(remaining, 0)
+        except Exception:
+            return 0
+
     async def _connect_and_listen(self) -> None:
         """Establish a WebSocket connection, perform the SignalR handshake,
         subscribe to notifications, and listen for messages.
@@ -170,7 +181,7 @@ class NuheatSignalRManager:
         token = await self._get_access_token()
         url = f"{SIGNALR_HUB_URL}?token={token}"
 
-        _LOGGER.info("Connecting to SignalR hub at %s", SIGNALR_HUB_URL)
+        _LOGGER.debug("Connecting to SignalR hub at %s", SIGNALR_HUB_URL)
 
         async with self._websession.ws_connect(
             url,
@@ -178,7 +189,7 @@ class NuheatSignalRManager:
             heartbeat=20,  # Send ping every 20s, aiohttp waits 15s for PONG
             timeout=HANDSHAKE_TIMEOUT,
         ) as ws:
-            _LOGGER.info("WebSocket connection established, sending handshake")
+            _LOGGER.debug("WebSocket connection established, sending handshake")
 
             # Step 1: Send the SignalR JSON protocol handshake
             handshake_msg = json.dumps(SIGNALR_PROTOCOL) + RECORD_SEPARATOR
@@ -190,7 +201,7 @@ class NuheatSignalRManager:
             handshake_response = await asyncio.wait_for(
                 ws.receive(), timeout=HANDSHAKE_TIMEOUT
             )
-            _LOGGER.info(
+            _LOGGER.debug(
                 "Handshake response received: type=%s, data=%s",
                 handshake_response.type,
                 handshake_response.data,
@@ -228,7 +239,7 @@ class NuheatSignalRManager:
             await self._subscribe(ws)
 
             self._connected = True
-            self._reconnect_attempt = 0
+            self._reconnect_attempt = 0  # Reset as soon as connection succeeds
             _LOGGER.info("SignalR connected to Nuheat notification hub")
 
             # Step 4: Listen for incoming messages
@@ -236,6 +247,15 @@ class NuheatSignalRManager:
             async for msg in ws:
                 if not self._running:
                     break
+
+                # Proactively reconnect 5 minutes before the token expires
+                # so the new connection uses a fresh token
+                if self._token_expires_in() < 300:
+                    _LOGGER.debug(
+                        "SignalR token expiring soon, reconnecting with fresh token"
+                    )
+                    break
+
                 _LOGGER.debug(
                     "SignalR raw message: type=%s, data=%s", msg.type, msg.data
                 )
@@ -272,7 +292,7 @@ class NuheatSignalRManager:
             "arguments": [notification_types],
         }
         msg = json.dumps(invocation) + RECORD_SEPARATOR
-        _LOGGER.info("Sending subscription invocation: %s", msg)
+        _LOGGER.debug("Sending subscription invocation: %s", msg)
         await ws.send_str(msg)
 
     # ------------------------------------------------------------------
@@ -323,7 +343,7 @@ class NuheatSignalRManager:
 
         # Type 3 = Completion (response to our Subscribe invocation)
         elif msg_type == 3:
-            _LOGGER.info("SignalR subscription confirmed by server: %s", message)
+            _LOGGER.debug("SignalR subscription confirmed by server: %s", message)
 
         else:
             _LOGGER.debug("Unhandled SignalR message type %s: %s", msg_type, message)

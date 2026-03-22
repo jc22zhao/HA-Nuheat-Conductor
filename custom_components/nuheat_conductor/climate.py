@@ -227,6 +227,11 @@ async def async_setup_entry(
         # Get thermostats
         thermostats = await api.get_thermostats()
         _LOGGER.debug("Found %d thermostats", len(thermostats))
+        if not thermostats:
+            _LOGGER.warning(
+                "No thermostats returned from API — check account credentials "
+                "and that thermostats are visible in the Nuheat app"
+            )
 
         # Get groups
         groups = await api.get_groups()
@@ -294,6 +299,7 @@ class NuheatConductorThermostat(ClimateEntity):
         self._is_heating = False
         self._is_online = True
         self._attr_available = True
+        self._consecutive_failures = 0  # Track API failures before marking unavailable
 
         # Set initial values from thermostat data
         self._update_from_data(thermostat_data)
@@ -326,46 +332,53 @@ class NuheatConductorThermostat(ClimateEntity):
 
         _LOGGER.debug("Raw thermostat data: %s", data)
 
-        # Convert temperatures from integer (3000 = 30.00°C, 2195 = 21.95°C) to float
-        # Thermostats only support 0.5° increments, so round to nearest 0.5
-        # This also handles imprecise values the API sometimes returns (e.g. 2186, 2192)
-        # which are artefacts of Fahrenheit/Celsius schedule conversions
-        def convert_temp(raw: int) -> float:
-            """Convert raw API temp integer to nearest 0.5 degree increment."""
-            return round((raw / 100.0) * 2) / 2
+        try:
+            # Convert temperatures from integer (3000 = 30.00°C, 2195 = 21.95°C) to float
+            # Thermostats only support 0.5° increments, so round to nearest 0.5
+            # This also handles imprecise values the API sometimes returns (e.g. 2186, 2192)
+            # which are artefacts of Fahrenheit/Celsius schedule conversions
+            def convert_temp(raw: int) -> float:
+                """Convert raw API temp integer to nearest 0.5 degree increment."""
+                return round((raw / 100.0) * 2) / 2
 
-        temp = data.get("currentTemperature")
-        self._current_temperature = convert_temp(temp) if temp is not None else None
-        _LOGGER.debug(
-            "Temperature conversion for %s: raw=%s, converted=%s, unit=%s",
-            self._attr_name,
-            temp,
-            self._current_temperature,
-            self._attr_temperature_unit,
-        )
+            temp = data.get("currentTemperature")
+            self._current_temperature = convert_temp(temp) if temp is not None else None
+            _LOGGER.debug(
+                "Temperature conversion for %s: raw=%s, converted=%s, unit=%s",
+                self._attr_name,
+                temp,
+                self._current_temperature,
+                self._attr_temperature_unit,
+            )
 
-        setpoint = data.get("setPointTemp")
-        self._target_temperature = (
-            convert_temp(setpoint) if setpoint is not None else None
-        )
+            setpoint = data.get("setPointTemp")
+            self._target_temperature = (
+                convert_temp(setpoint) if setpoint is not None else None
+            )
 
-        min_temp = data.get("minTemp")
-        self._min_temperature = convert_temp(min_temp) if min_temp is not None else None
+            min_temp = data.get("minTemp")
+            self._min_temperature = (
+                convert_temp(min_temp) if min_temp is not None else None
+            )
 
-        max_temp = data.get("maxTemp")
-        self._max_temperature = convert_temp(max_temp) if max_temp is not None else None
+            max_temp = data.get("maxTemp")
+            self._max_temperature = (
+                convert_temp(max_temp) if max_temp is not None else None
+            )
 
-        self._schedule_mode = data.get("scheduleMode")
-        self._is_online = data.get("online", True)
+            self._schedule_mode = data.get("scheduleMode")
+            self._is_online = data.get("online", True)
 
-        # If offline, override heating status to prevent showing active heating
-        if not self._is_online:
-            self._is_heating = False
-        else:
-            self._is_heating = data.get("isHeating", False)
+            # If offline, override heating status to prevent showing active heating
+            if not self._is_online:
+                self._is_heating = False
+            else:
+                self._is_heating = data.get("isHeating", False)
 
-        # Keep entity available even when offline so data still displays
-        # We'll indicate offline status through hvac_action and attributes
+        except Exception:
+            _LOGGER.exception(
+                "Error parsing thermostat data for %s: %s", self._attr_name, data
+            )
 
     @property
     def current_temperature(self) -> float | None:
@@ -416,10 +429,14 @@ class NuheatConductorThermostat(ClimateEntity):
 
     @property
     def supported_features(self) -> ClimateEntityFeature:
-        """Return the list of supported features."""
-        # Disable all controls when thermostat is offline
-        if not self._is_online:
-            return ClimateEntityFeature(0)  # No features when offline
+        """Return the list of supported features.
+
+        Always return full features even when offline. The offline guard lives
+        inside async_set_temperature and async_set_preset_mode. Returning no
+        features when offline causes HA automations to throw 'does not support
+        action' errors and abort, preventing other thermostats in the same
+        automation call from being updated.
+        """
         return (
             ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
         )
@@ -567,8 +584,11 @@ class NuheatConductorThermostat(ClimateEntity):
             )
             return
 
+        # Map HVAC mode to a temperature change:
+        # HEAT - restore to current target (or do nothing if already heating)
+        # OFF  - set to minimum temperature as a soft off
         if hvac_mode == HVACMode.HEAT:
-            if self._target_temperature:
+            if self._target_temperature is not None:
                 await self.async_set_temperature(temperature=self._target_temperature)
         elif hvac_mode == HVACMode.OFF:
             await self.async_set_temperature(temperature=self.min_temp)
@@ -580,13 +600,20 @@ class NuheatConductorThermostat(ClimateEntity):
 
         data = await self._api.get_thermostat_data(self._thermostat_id)
         if data:
+            self._consecutive_failures = 0
             self._update_from_data(data)
-            # Keep entity available even if thermostat is offline
-            # This allows users to see last known settings
             self._attr_available = True
         else:
-            # Only mark unavailable if we can't reach the API at all
-            self._attr_available = False
+            self._consecutive_failures += 1
+            # Only mark unavailable after 3 consecutive failures to avoid
+            # flickering unavailable on transient network blips
+            if self._consecutive_failures >= 3:
+                _LOGGER.warning(
+                    "%s marked unavailable after %d consecutive API failures",
+                    self._attr_name,
+                    self._consecutive_failures,
+                )
+                self._attr_available = False
 
 
 class NuheatConductorGroup(ClimateEntity):
@@ -648,9 +675,12 @@ class NuheatConductorGroup(ClimateEntity):
 
         self._away_mode = data.get("awayMode", False)
 
-        # Convert away setpoint temperature
+        # Convert away setpoint temperature, rounded to nearest 0.5°C
         away_temp = data.get("awaySetPointTemp")
-        self._away_setpoint = away_temp / 100.0 if away_temp is not None else None
+        if away_temp is not None:
+            self._away_setpoint = round((away_temp / 100.0) * 2) / 2
+        else:
+            self._away_setpoint = None
 
     @property
     def hvac_mode(self) -> HVACMode:
