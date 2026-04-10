@@ -156,13 +156,10 @@ entity: climate.nuheat_living_room
 ### Offline Thermostat Behaviour
 
 When a thermostat goes offline:
-- The entity remains visible in Home Assistant showing last known settings
-- The HVAC mode shows as **Off** and the HVAC action shows as **Off**
-- The entity's `connection_status` attribute changes to `Offline` and a `warning` attribute is added
-- Temperature and preset commands are silently skipped — **automations will not abort** and will continue updating other thermostats in the same call
-- The entity is only marked fully unavailable after 3 consecutive failed API polls (approximately 4.5 minutes)
-
-> **Note:** Due to a Home Assistant limitation, if your automation targets multiple thermostats in a single `climate.set_temperature` call and one is marked fully unavailable, that entire service call will fail. The integration deliberately avoids marking thermostats unavailable for transient offline states to prevent this. You can check whether a thermostat is offline via its `connection_status` attribute.
+- The entity remains visible in Home Assistant with last known settings
+- The entity shows `connection_status: Offline` in its attributes
+- Temperature and preset controls remain available — commands are silently skipped for offline thermostats but **do not prevent automations from continuing** to update other thermostats
+- The entity is only marked fully unavailable after 3 consecutive failed API polls
 
 ## Real-time Updates
 
@@ -209,6 +206,24 @@ This integration connects to:
 2. If using Nabu Casa Cloud, ensure your subscription is active
 3. Try using the local network URL instead of external URL during setup
 4. Restart Home Assistant and try again
+
+#### Setting Up on iPhone / iOS (Nuheat App Interference)
+
+**Symptoms:**
+* OAuth redirect opens the Nuheat app instead of completing in the browser
+* The Nuheat app asks about Alexa authorization
+* After dismissing, you see an "authentication disallowed" error in Home Assistant
+
+**Cause:**
+iOS Universal Links intercept the Nuheat identity server URL and redirect it to the Nuheat app, which is designed for Alexa authentication — not Home Assistant. This happens in both Safari and the Home Assistant app on iOS.
+
+**Solutions (in order of preference):**
+
+1. **Use a desktop/laptop browser** *(recommended)* — Complete the initial setup from a computer browser. Once configured, the integration runs normally and you can control thermostats from your phone as usual. Setup only needs to be done once.
+
+2. **Temporarily uninstall the Nuheat app** — Without the app installed, iOS cannot redirect to it and Safari will complete the OAuth flow normally. Reinstall the Nuheat app after the integration is configured.
+
+3. **Try Firefox on iOS** — Firefox handles Universal Links differently from Safari and may complete the OAuth flow without redirecting to the Nuheat app.
 
 ### Integration Not Appearing
 
