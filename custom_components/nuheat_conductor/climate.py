@@ -205,24 +205,23 @@ async def async_setup_entry(
     api = NuheatConductorAPI(oauth_session, websession)
 
     try:
-        # Get account info to determine user preferences
+        # Get account info to determine user preferences (e.g. clock format).
+        # Note: the Nuheat API always returns raw temperature values in Celsius,
+        # regardless of the account's "temperatureScale" display preference (that
+        # preference only affects the Nuheat app's own UI). Home Assistant is told
+        # the native unit is Celsius so it can convert to the user's configured
+        # display unit automatically.
         account_info = await api.get_account_info()
-        temp_scale = UnitOfTemperature.FAHRENHEIT  # Default to Fahrenheit
+        temp_scale = UnitOfTemperature.CELSIUS
         use_12_hour = True  # Default to 12-hour clock
 
         if account_info:
-            scale = account_info.get("temperatureScale")
             use_12_hour = account_info.get("use12Hour", True)
             _LOGGER.debug(
                 "Account preferences - temperature scale: %s, use 12-hour: %s",
-                scale,
+                account_info.get("temperatureScale"),
                 use_12_hour,
             )
-            # API returns "Celsius" or "Fahrenheit" as strings
-            if scale == "Celsius":
-                temp_scale = UnitOfTemperature.CELSIUS
-            elif scale == "Fahrenheit":
-                temp_scale = UnitOfTemperature.FAHRENHEIT
 
         # Get thermostats
         thermostats = await api.get_thermostats()
