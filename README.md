@@ -1,3 +1,13 @@
+## ⚠️ Project Status: Looking for a New Maintainer
+
+I no longer have access to Nuheat Conductor thermostats, and I will no longer be actively developing or maintaining this integration.
+
+The code is functional as of the last release, but I won't be fixing bugs, or adding features going forward.
+
+If you're interested in taking over maintenance of this project, please reach out via [GitHub Issues](https://github.com/SmilesGalore/HA-Nuheat-Conductor/issues) or [Discussions](https://github.com/SmilesGalore/HA-Nuheat-Conductor/discussions) — I'm happy to hand off the repository or add you as a collaborator.
+
+---
+
 # Nuheat Conductor Thermostat Integration for Home Assistant
 
 A custom Home Assistant integration for Nuheat Conductor radiant heating thermostats. Control and monitor your Nuheat Conductor heating systems directly from Home Assistant.
@@ -271,6 +281,8 @@ Then restart Home Assistant and check logs at **Settings** → **System** → **
 
 ## Support
 
+Note: This project is no longer actively maintained (see status above).
+
 * **Issues:** [GitHub Issues](https://github.com/SmilesGalore/HA-Nuheat-Conductor/issues)
 * **Discussions:** [GitHub Discussions](https://github.com/SmilesGalore/HA-Nuheat-Conductor/discussions)
 * **Home Assistant Community:** [Home Assistant Forums](https://community.home-assistant.io/)
@@ -301,4 +313,4 @@ This is an unofficial integration and is not affiliated with, endorsed by, or su
 
 ---
 
-**Current Version:** 1.0.0-beta.8
+**Current Version:** 1.0.0-beta.9 (final release, unmaintained)
