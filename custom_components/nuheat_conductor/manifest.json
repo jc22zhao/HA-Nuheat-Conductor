@@ -6,8 +6,8 @@
   ],
   "config_flow": true,
   "documentation": "https://github.com/jc22zhao/HA-Nuheat-Conductor",
-  "issue_tracker": "https://github.com/jc22zhao/HA-Nuheat-Conductor/issues",
   "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/jc22zhao/HA-Nuheat-Conductor/issues",
   "requirements": [],
   "version": "1.0.1"
 }
