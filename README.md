@@ -1,18 +1,38 @@
-## ⚠️ Project Status: Looking for a New Maintainer
+## ✅ Project Status: Actively Maintained
 
-I no longer have access to Nuheat Conductor thermostats, and I will no longer be actively developing or maintaining this integration.
+This is a maintained fork of [SmilesGalore/HA-Nuheat-Conductor](https://github.com/SmilesGalore/HA-Nuheat-Conductor).
+The original author stepped back after losing access to Nuheat hardware. I maintain this
+against a live Nuheat **Signature** thermostat on the Conductor cloud platform, so fixes
+can actually be tested against real hardware.
 
-The code is functional as of the last release, but I won't be fixing bugs, or adding features going forward.
-
-If you're interested in taking over maintenance of this project, please reach out via [GitHub Issues](https://github.com/SmilesGalore/HA-Nuheat-Conductor/issues) or [Discussions](https://github.com/SmilesGalore/HA-Nuheat-Conductor/discussions) — I'm happy to hand off the repository or add you as a collaborator.
+Issues and pull requests are welcome.
 
 ---
+
+## ⚠️ Important: Signature owners, read this
+
+**If you own a Nuheat Signature thermostat, this is the integration you want — not the
+official one.** That is the opposite of what older documentation says, and here is why:
+
+* nVent retired the legacy `mynuheat.com` cloud API. As of this writing that hostname does
+  not resolve at all, and Signature accounts were migrated onto the **Conductor** cloud
+  platform (`identity.nam.mynuheat.com`).
+* Home Assistant's built-in [`nuheat`](https://www.home-assistant.io/integrations/nuheat/)
+  integration still depends on the `nuheat` PyPI library, last released **January 2023**,
+  which targets that dead hostname. It therefore cannot authenticate for anyone, regardless
+  of thermostat model.
+* "Conductor" in this integration's name refers to the **cloud platform**, not the
+  thermostat model. Signature and Conductor hardware both live on it now.
+
+If the built-in integration stopped working for you around mid-2026, this is why.
 
 # Nuheat Conductor Thermostat Integration for Home Assistant
 
 A custom Home Assistant integration for Nuheat Conductor radiant heating thermostats. Control and monitor your Nuheat Conductor heating systems directly from Home Assistant.
 
-This integration is for **Nuheat Conductor** thermostats. For Nuheat Signature thermostats, please use the official [Nuheat Integration](https://www.home-assistant.io/integrations/nuheat/) in Home Assistant.
+This integration works with thermostats on the **Nuheat Conductor cloud platform**, which now
+includes both Conductor and **Signature** hardware. See the note above — the official
+Home Assistant `nuheat` integration is no longer functional for either.
 
 ## Features
 
@@ -39,7 +59,7 @@ This integration is for **Nuheat Conductor** thermostats. For Nuheat Signature t
 
 1. Open HACS in Home Assistant
 2. Click the three dots menu (top right) → **Custom repositories**
-3. Add repository URL: `https://github.com/SmilesGalore/HA-Nuheat-Conductor`
+3. Add repository URL: `https://github.com/jc22zhao/HA-Nuheat-Conductor`
 4. Select category: **Integration**
 5. Click **Add**
 6. Find "Nuheat Conductor" in HACS and click **Download**
@@ -283,8 +303,8 @@ Then restart Home Assistant and check logs at **Settings** → **System** → **
 
 Note: This project is no longer actively maintained (see status above).
 
-* **Issues:** [GitHub Issues](https://github.com/SmilesGalore/HA-Nuheat-Conductor/issues)
-* **Discussions:** [GitHub Discussions](https://github.com/SmilesGalore/HA-Nuheat-Conductor/discussions)
+* **Issues:** [GitHub Issues](https://github.com/jc22zhao/HA-Nuheat-Conductor/issues)
+* **Discussions:** [GitHub Discussions](https://github.com/jc22zhao/HA-Nuheat-Conductor/discussions)
 * **Home Assistant Community:** [Home Assistant Forums](https://community.home-assistant.io/)
 
 ## Contributing
