@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult
 from homeassistant.helpers import config_entry_oauth2_flow
 
 from .const import (
@@ -67,11 +67,24 @@ class NuheatConductorOAuth2FlowHandler(
         """Handle a flow initiated by the user."""
         await self.async_set_unique_id(DOMAIN)
 
-        if self._async_current_entries():
+        # 2026-09-20: both guards below are skipped during reauth.
+        #
+        # async_step_reauth_confirm routes into this step to start the OAuth
+        # handshake, and a reauth ALWAYS has an existing entry - it is the entry
+        # being repaired. So the single-instance abort fired the instant Submit was
+        # pressed and the flow ended on "single_instance_allowed" before any browser
+        # login could open. The reauth repair was therefore impossible to complete,
+        # and the integration could only be recovered by deleting and re-adding it.
+        if self.source != SOURCE_REAUTH and self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
 
-        # Check if there's an in-progress flow (happens when OAuth was interrupted)
-        if self.hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+        # Same exemption, same reason: during a reauth the flow asking this question
+        # is itself in progress, so this warning always fired and told the user to
+        # restart Home Assistant - advice that was never relevant to a stale token.
+        if (
+            self.source != SOURCE_REAUTH
+            and self.hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        ):
             _LOGGER.warning(
                 "Detected interrupted OAuth flow. User should restart Home Assistant before retrying."
             )
