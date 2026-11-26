@@ -21,6 +21,7 @@ from typing import Any
 
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.config_entry_oauth2_flow import CLOCK_OUT_OF_SYNC_MAX_SEC
 from homeassistant.core import HomeAssistant
 
 from .const import API_URL
@@ -39,6 +40,13 @@ RECONNECT_DELAYS = [5, 10, 30, 60]
 
 # How long to wait for the WebSocket handshake to complete
 HANDSHAKE_TIMEOUT = 10
+
+# Rotate onto a fresh token only once HA itself will refresh it. OAuth2Session
+# refreshes when the token is within CLOCK_OUT_OF_SYNC_MAX_SEC (20s) of expiry;
+# rotating any earlier (this used to be 300s) reconnects with the SAME token,
+# trips the check again on the first message, and loops every 5s for ~4.5 min
+# of every token hour - 4,600 warnings in 3.5 days and no push updates meanwhile.
+TOKEN_ROTATE_MARGIN = CLOCK_OUT_OF_SYNC_MAX_SEC
 
 # SignalR protocol version
 SIGNALR_PROTOCOL = {"protocol": "json", "version": 1}
@@ -129,7 +137,10 @@ class NuheatSignalRManager:
         """Main loop: connect, listen, reconnect on failure."""
         while self._running:
             try:
-                await self._connect_and_listen()
+                if await self._connect_and_listen():
+                    # Planned token rotation, not a failure: reconnect now, quietly
+                    self._reconnect_attempt = 0
+                    continue
                 # Clean exit - reset the reconnect counter
                 self._reconnect_attempt = 0
             except asyncio.CancelledError:
@@ -174,10 +185,13 @@ class NuheatSignalRManager:
         except Exception:
             return 0
 
-    async def _connect_and_listen(self) -> None:
+    async def _connect_and_listen(self) -> bool:
         """Establish a WebSocket connection, perform the SignalR handshake,
         subscribe to notifications, and listen for messages.
+
+        Returns True when it left only to rotate onto a fresh token.
         """
+        rotate = False
         token = await self._get_access_token()
         url = f"{SIGNALR_HUB_URL}?token={token}"
 
@@ -248,12 +262,13 @@ class NuheatSignalRManager:
                 if not self._running:
                     break
 
-                # Proactively reconnect 5 minutes before the token expires
-                # so the new connection uses a fresh token
-                if self._token_expires_in() < 300:
+                # Reconnect just before the token expires, inside HA's own
+                # refresh window, so the new connection gets a fresh token
+                if self._token_expires_in() < TOKEN_ROTATE_MARGIN:
                     _LOGGER.debug(
                         "SignalR token expiring soon, reconnecting with fresh token"
                     )
+                    rotate = True
                     break
 
                 _LOGGER.debug(
@@ -274,6 +289,7 @@ class NuheatSignalRManager:
                     break
 
         self._connected = False
+        return rotate
 
     async def _subscribe(self, ws: Any) -> None:
         """Send a SignalR invocation to subscribe to notifications.
